@@ -1,12 +1,17 @@
 // SPDX-License-Identifier: Apache-2.0
 // Transcribes WAV files with the native runtime and prints one JSON line each,
-// for parity checks against the Python reference server.
+// for parity checks against the Python reference server. --windowed replays
+// each file as a realtime live feed instead.
+#include <algorithm>
+#include <atomic>
 #include <chrono>
 #include <fstream>
 #include <iostream>
+#include <optional>
 #include <sstream>
 #include <stdexcept>
 #include <string>
+#include <tuple>
 #include <vector>
 
 #include "common/audio.h"
@@ -14,6 +19,122 @@
 #include "nlohmann/json.hpp"
 #include "qwen3_asr/qwen3_asr_model.h"
 #include "qwen3_asr/qwen3_asr_transcriber.h"
+#include "qwen3_asr/realtime.h"
+
+namespace {
+
+// Voxt's live feed appends 0.1 s at a time; the rest follow realtime.cpp.
+constexpr long kAppendSampleCount = qwen3_asr::kSampleRate / 10;
+constexpr int kPrefixAfterRefreshCount = 2;
+constexpr int kPrefixRollbackTokenCount = 5;
+constexpr float kSilentPeak = 1e-3f;
+
+// Feeds samples to one realtime session as the server handles it with its
+// default settings: previews on the decode cadence, and finals at each max
+// segment cut and at the end. Previews land as if each decode ended within the
+// interval. Prints one JSON line per decode; returns the finals joined.
+std::string ReplayLiveFeed(const qwen3_asr::Qwen3ASRTranscriber &transcriber,
+                           const std::vector<float> &samples,
+                           const qwen3_asr::TranscriptionOptions &options,
+                           const std::atomic<bool> &cancel) {
+  const qwen3_asr::RealtimeSettings settings = qwen3_asr::MakeRealtimeSettings(
+      /*decode_interval_ms=*/1000, /*first_decode_ms=*/100,
+      /*max_segment_seconds=*/30.0);
+  struct Segment {
+    long start_sample = 0;
+    long next_refresh_sample = 0;
+    int decode_count = 0;
+    std::optional<std::string> language;
+    std::string transcript;
+  };
+  const auto new_segment = [&](long start_sample) {
+    Segment segment;
+    segment.start_sample = start_sample;
+    segment.next_refresh_sample = start_sample + settings.first_decode_samples;
+    segment.language = options.language;
+    return segment;
+  };
+  const auto is_silent = [&](const Segment &segment, long end_sample) {
+    return qwen3_asr::PeakIsSilent(samples.data() + segment.start_sample,
+                                   end_sample - segment.start_sample,
+                                   kSilentPeak);
+  };
+  const auto decode = [&](Segment &segment, long end_sample, bool is_final) {
+    qwen3_asr::TranscriptionOptions decode_options = options;
+    decode_options.language = segment.language;
+    if (segment.decode_count >= kPrefixAfterRefreshCount &&
+        !segment.transcript.empty() && segment.language.has_value()) {
+      std::tie(decode_options.prefix_token_ids, decode_options.prefix_text) =
+          transcriber.RetainedPrefix(segment.transcript,
+                                     kPrefixRollbackTokenCount);
+    } else {
+    }
+    segment.decode_count += 1;
+    const qwen3_asr::TranscriptionResult result = transcriber.Transcribe(
+        std::vector<float>(samples.begin() + segment.start_sample,
+                           samples.begin() + end_sample),
+        decode_options, cancel);
+    if (result.language.has_value() && !result.language->empty()) {
+      segment.language = result.language;
+    } else {
+    }
+    segment.transcript = result.text;
+    std::cout << nlohmann::ordered_json(
+                     {{"is_final", is_final},
+                      {"segment_s",
+                       static_cast<double>(end_sample - segment.start_sample) /
+                           qwen3_asr::kSampleRate},
+                      {"gen_tokens", result.generated_token_count},
+                      {"text", result.text}})
+                     .dump()
+              << std::endl;
+  };
+  std::vector<std::string> finals;
+  const auto finalize = [&](Segment &segment, long end_sample) {
+    if (is_silent(segment, end_sample)) {
+      finals.emplace_back();
+    } else {
+      decode(segment, end_sample, true);
+      finals.push_back(segment.transcript);
+    }
+  };
+
+  const long total_sample_count = static_cast<long>(samples.size());
+  Segment segment = new_segment(0);
+  long end_sample = 0;
+  while (end_sample < total_sample_count) {
+    end_sample = std::min(total_sample_count, end_sample + kAppendSampleCount);
+    if (end_sample - segment.start_sample >= settings.max_segment_samples) {
+      const long cut_sample =
+          segment.start_sample + settings.max_segment_samples;
+      finalize(segment, cut_sample);
+      segment = new_segment(cut_sample);
+    } else {
+    }
+    if (end_sample >= segment.next_refresh_sample) {
+      const bool silent = is_silent(segment, end_sample);
+      // Note (Jiaxin Deng): leading silence keeps the early first decode for
+      // the first audible audio.
+      if (!(silent && segment.decode_count == 0)) {
+        segment.next_refresh_sample =
+            end_sample + settings.decode_interval_samples;
+      } else {
+      }
+      if (!silent) {
+        decode(segment, end_sample, false);
+      } else {
+      }
+    } else {
+    }
+  }
+  if (end_sample > segment.start_sample) {
+    finalize(segment, end_sample);
+  } else {
+  }
+  return qwen3_asr::JoinTranscriptParts(finals);
+}
+
+} // namespace
 
 int main(int argc, char **argv) {
   using qwen3_asr::AudioLayout;
@@ -23,6 +144,7 @@ int main(int argc, char **argv) {
   std::string encode_lines;
   bool encode = false;
   bool profile = false;
+  bool windowed = false;
   qwen3_asr::TranscriptionOptions options;
   std::vector<std::string> files;
   for (int i = 1; i < argc; ++i) {
@@ -52,6 +174,8 @@ int main(int argc, char **argv) {
       encode_lines = value();
     } else if (argument == "--profile") {
       profile = true;
+    } else if (argument == "--windowed") {
+      windowed = true;
     } else if (argument == "--dump-mel-filters") {
       dump_mel_filters = value();
     } else {
@@ -151,20 +275,26 @@ int main(int argc, char **argv) {
     std::ostringstream bytes;
     bytes << stream.rdbuf();
     const auto started = std::chrono::steady_clock::now();
-    const auto result = transcriber.Transcribe(
-        qwen3_asr::DecodeWav(bytes.str()), options, cancel);
-    nlohmann::json line = {
-        {"file", file},
-        {"text", result.text},
-        {"language", result.language.has_value()
-                         ? nlohmann::json(*result.language)
-                         : nlohmann::json()},
-        {"generated_token_count", result.generated_token_count},
-        {"finish_reason", qwen3_asr::FinishReasonName(result.finish_reason)},
-        {"seconds", std::chrono::duration<double>(
-                        std::chrono::steady_clock::now() - started)
-                        .count()},
-    };
+    const std::vector<float> samples = qwen3_asr::DecodeWav(bytes.str());
+    nlohmann::json line;
+    if (windowed) {
+      line = {{"file", file},
+              {"text", ReplayLiveFeed(transcriber, samples, options, cancel)}};
+    } else {
+      const auto result = transcriber.Transcribe(samples, options, cancel);
+      line = {
+          {"file", file},
+          {"text", result.text},
+          {"language", result.language.has_value()
+                           ? nlohmann::json(*result.language)
+                           : nlohmann::json()},
+          {"generated_token_count", result.generated_token_count},
+          {"finish_reason", qwen3_asr::FinishReasonName(result.finish_reason)},
+      };
+    }
+    line["seconds"] = std::chrono::duration<double>(
+                          std::chrono::steady_clock::now() - started)
+                          .count();
     std::cout << line.dump() << std::endl;
     // Note (Jiaxin Deng): as the server does between requests; buffers of one
     // clip's sizes rarely fit the next, so the cache would grow without end.
