@@ -89,6 +89,9 @@ std::string ReplayLiveFeed(const qwen3_asr::Qwen3ASRTranscriber &transcriber,
                       {"segment_s",
                        static_cast<double>(end_sample - segment.start_sample) /
                            qwen3_asr::kSampleRate},
+                      {"melenc_ms", result.melenc_ms},
+                      {"prefill_ms", result.prefill_ms},
+                      {"decode_ms", result.decode_ms},
                       {"gen_tokens", result.generated_token_count},
                       {"text", result.text}})
                      .dump()
