@@ -53,6 +53,10 @@ struct TranscriptionResult {
   FinishReason finish_reason = FinishReason::kLength;
   // Timestamped speaker segments, for models that produce them.
   std::vector<SpeakerSegment> segments;
+  // TEMP (not committed): per-phase timing.
+  double melenc_ms = 0.0;
+  double prefill_ms = 0.0;
+  double decode_ms = 0.0;
 };
 
 class TranscriptionCancelled : public std::runtime_error {

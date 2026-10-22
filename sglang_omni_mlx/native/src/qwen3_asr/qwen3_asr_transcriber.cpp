@@ -3,6 +3,7 @@
 
 #include <algorithm>
 #include <cctype>
+#include <chrono>
 #include <cmath>
 #include <map>
 #include <set>
@@ -251,10 +252,17 @@ Qwen3ASRTranscriber::Transcribe(const std::vector<float> &samples,
     throw TranscriptionCancelled();
   } else {
   }
+  using Clock = std::chrono::steady_clock;
+  const auto ms = [](Clock::time_point a, Clock::time_point b) {
+    return std::chrono::duration<double, std::milli>(b - a).count();
+  };
+  const auto t0 = Clock::now();
   const mx::array mel = LogMel(samples, options.layout);
   const int audio_token_count = TokenCount(mel.shape(-1), options.layout);
-  const std::vector<int> prompt_ids = PromptIds(audio_token_count, options);
   const mx::array audio_features = model_.EncodeAudio(mel, options.layout);
+  mx::eval(audio_features);
+  const auto t1 = Clock::now();
+  const std::vector<int> prompt_ids = PromptIds(audio_token_count, options);
   const mx::array input_ids(
       prompt_ids.data(), {1, static_cast<int>(prompt_ids.size())}, mx::int32);
   mx::array embeddings = model_.EmbedTokens(input_ids);
@@ -288,6 +296,8 @@ Qwen3ASRTranscriber::Transcribe(const std::vector<float> &samples,
   std::vector<KVCache> caches = model_.NewCaches();
   mx::array next_token = mx::argmax(model_.Decode(embeddings, caches));
   mx::async_eval({next_token});
+  mx::eval(next_token);
+  const auto t2 = Clock::now();
   std::vector<int> output_ids;
   FinishReason finish_reason = FinishReason::kLength;
   while (static_cast<int>(output_ids.size()) < max_new_tokens) {
@@ -312,13 +322,21 @@ Qwen3ASRTranscriber::Transcribe(const std::vector<float> &samples,
     } else {
     }
   }
+  // The step queued past the last token still runs; count it here.
+  mx::eval(next_token);
+  const auto t3 = Clock::now();
   auto [text, language] = SplitOutput(output_ids, options);
   const bool ended_on_stop = !output_ids.empty() && is_stop(output_ids.back());
-  return {options.prefix_text + text,
-          language,
-          static_cast<int>(output_ids.size()) - (ended_on_stop ? 1 : 0),
-          finish_reason,
-          {}};
+  TranscriptionResult result{
+      options.prefix_text + text,
+      language,
+      static_cast<int>(output_ids.size()) - (ended_on_stop ? 1 : 0),
+      finish_reason,
+      {}};
+  result.melenc_ms = ms(t0, t1);
+  result.prefill_ms = ms(t1, t2);
+  result.decode_ms = ms(t2, t3);
+  return result;
 }
 
 std::pair<std::string, std::optional<std::string>>
