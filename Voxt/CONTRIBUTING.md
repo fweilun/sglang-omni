@@ -95,22 +95,29 @@ PKG and staple their tickets.
 
 ### Releases
 
-A maintainer releases Voxt by raising `MARKETING_VERSION` on `main` and pushing
-a `voxt-vX.Y.Z` tag that matches it:
+A maintainer releases Voxt by pushing a `voxt-vX.Y.Z` tag on `main`. The tag
+sets the version and the build number, and must be newer than every existing
+`voxt-v` tag, because installed copies only update to a higher build.
+`MARKETING_VERSION` in the project is what local builds use; it does not need
+to change for a release.
 
 1. `Voxt Release` builds the runtime and the universal app on GitHub's macOS
    runner, signs and notarizes them as above, and uploads the ZIP, DMG, PKG and
    their SHA-256 files to a draft release. The build number follows the
    original Voxt scheme (1.16.2 is 101600299). A manual run without a tag only
    builds an unsigned package.
-2. The maintainer installs the draft's DMG, checks it, replaces the TODO line in
-   the draft's notes with the changes, and publishes the release.
+2. The draft's notes already hold the requirements, install steps, build
+   source and the pull requests that touched `Voxt/` or
+   `sglang_omni_mlx/native` since the previous `voxt-v` tag. The maintainer
+   installs the draft's DMG, checks it, replaces each TODO line (a one-sentence
+   summary, Changed and Fixed; drop a section with nothing in it), and
+   publishes the release.
 3. Publishing runs `Voxt Appcast`, which signs the ZIP with the Sparkle key,
    uploads the ZIP and DMG to the Voxt update service, and makes the version the
    latest entry of the stable appcast, so installed copies offer it as an update.
    The in-app notes are the release notes; sections titled `English`,
    `简体中文` or `日本語` are shown to users of that language. It refuses notes
-   that still contain the TODO line. It then points the Homebrew cask in
+   that still contain a TODO line. It then points the Homebrew cask in
    `hehehai/homebrew-tap` at the release. A manual run with a tag republishes
    that release.
 

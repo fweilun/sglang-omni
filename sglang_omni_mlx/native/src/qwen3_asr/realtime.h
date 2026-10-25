@@ -4,6 +4,7 @@
 #pragma once
 
 #include <condition_variable>
+#include <cstdint>
 #include <functional>
 #include <memory>
 #include <mutex>
